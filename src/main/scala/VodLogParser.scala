@@ -266,9 +266,9 @@ object WatchLogParse{
 
     }.groupBy(_._1)
 
-    grpCategory.zipWithIndex.foreach{
+    grpCategory.toList.sortBy(_._1).foreach{
 
-      case (progs, idx) => println(s"idx=$idx $progs")
+      case (category, progs) => println(s"idx=$category $progs")
     }
 
 

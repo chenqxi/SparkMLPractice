@@ -197,7 +197,9 @@ object WatchLogParse{
     //OK data set is ready, the item look like (program, day off since first day) watch times
     // we can use k-means algorithm to cluster the category of programs
     import org.apache.spark.mllib.clustering.KMeans
+    import org.apache.spark.mllib.clustering.KMeansModel
     import org.apache.spark.mllib.linalg.Vectors
+    import org.apache.spark.mllib.linalg.Vector
 
 
     val programIdMap = watchxDay.map(_._1).zipWithIndex.map{
@@ -212,31 +214,69 @@ object WatchLogParse{
       Vectors.dense(e._2.map(_._2.asInstanceOf[Double]).toArray)
     }
 
-      val featureRDD = sc.parallelize(features,100).cache
+    val featureRDD = sc.parallelize(features, 100).cache
 
 
     // Cluster the data into two classes using KMeans
     import collection.mutable.ArrayBuffer
-    var rt = ArrayBuffer[(Int,Int,Double)]()
+    var rt = ArrayBuffer[(KMeansModel, Int,Int,Double)]()
 
     for (iter <- Array(20, 50, 100);
       cluster <- Array(10, 20, 50 )) {
 
-      val clusters = KMeans.train(featureRDD, cluster, iter)
+      val model = KMeans.train(featureRDD, cluster, iter)
+
 
       // Evaluate clustering by computing Within Set Sum of Squared Errors
-      val WSSSE = clusters.computeCost(featureRDD)
+      val WSSSE = model.computeCost(featureRDD)
 
-      rt +=  Tuple3(iter, cluster, WSSSE)
+      rt +=  Tuple4(model, iter, cluster, WSSSE)
       println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + WSSSE)
     }
 
+    rt.foreach{
+
+      case (model, iter, cluster, wssse) => println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + wssse)
+    }
+
+
+    val models = rt.map { e => val model = e._1
+      //display the model in detail
+      model.clusterCenters.foreach { c =>
+
+        println(s"Cluster center $c")
+
+      }
+
+      model
+    }
+
+
+    //it seems iter=20 cluster=50 is best model, let's choose it as candidate
+    val goodModel = rt.reduceLeft{ (l, r ) =>
+
+      if (r._2==20 && r._3==50)  r else l
+
+    }._1
+
+    val grpCategory = features.zipWithIndex.map{
+
+      case (v, idx ) => val category = goodModel.predict(v)
+        (category, pid2pname(programIdMap(idx)))
+
+    }.groupBy(_._1)
+
+    grpCategory.zipWithIndex.foreach{
+
+      case (progs, idx) => println(s"idx=$idx $progs")
+    }
+
+
 
   }
 
 
 
-  }
 
 
 }

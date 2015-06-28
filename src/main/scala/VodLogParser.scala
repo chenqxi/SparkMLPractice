@@ -5,6 +5,7 @@
 import org.joda.time.DateTime
 
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
 import org.apache.spark.{SparkConf, SparkContext}
 
@@ -32,6 +33,8 @@ object WatchLogParse{
 
     val conf = new SparkConf()
     val sc = new SparkContext(conf)
+
+
     val ssc = new SQLContext(sc)
     import ssc.implicits._
 
@@ -115,11 +118,11 @@ object WatchLogParse{
     }
 
     // aggregateByKey has higher efficiency than groupByKey, we prefer this method
-    val watchPid2 = watchLogDf.join(top500pid, $"pid" === $"tpid" ).groupBy( $"pid", $"day").count.rdd.map{
+    val watchPid2 = watchLogDf.join(top500pid, $"pid" === $"tpid" ).groupBy( $"pid", $"day").count.select($"pid", $"day", $"count" cast("int")).map{
 
-      case Row(p, d, cnt) => Some(p, (new DateTime(d), cnt))
+      case Row(p, d, cnt:Int) => Some(p, (new DateTime(d), cnt))
       case _@f =>  println(s"not match $f"); None
-    }.filter(_!=None).map(_.get).aggregateByKey(collection.mutable.Set[(DateTime, Any)]())(  (u, v) => u += v , (u1,u2) => u1++=u2 )
+    }.filter(_!=None).map(_.get).aggregateByKey(collection.mutable.Set[(DateTime, Int)]())(  (u, v) => u += v , (u1,u2) => u1++=u2 )
 
 
     val watchPidLocal = watchPid2.collectAsMap.mapValues(
@@ -151,7 +154,8 @@ object WatchLogParse{
     //2.extract each program first 30 day watch num
     val watchDur = 30
 
-    val watchxDay = watchPidLocal.mapValues { w => //foreach pid
+    //key is pid
+    val watchxDay = watchPidLocal.mapValues { w =>
 
 
       var startDay  =  w.map(_._1).min //first watch log date
@@ -163,6 +167,7 @@ object WatchLogParse{
 
       val wmap = w.toMap
 
+      //pay attention the first index is 0
       val rt = (0 until watchDur).toVector.map{
 
         i =>
@@ -173,7 +178,7 @@ object WatchLogParse{
       }
 
       rt
-    }
+    }.toSeq
 
     for (p <- watchxDay ) {
 
@@ -189,10 +194,49 @@ object WatchLogParse{
     }
 
 
+    //OK data set is ready, the item look like (program, day off since first day) watch times
+    // we can use k-means algorithm to cluster the category of programs
+    import org.apache.spark.mllib.clustering.KMeans
+    import org.apache.spark.mllib.linalg.Vectors
+
+
+    val programIdMap = watchxDay.map(_._1).zipWithIndex.map{
+
+      case (pid, idx) => (idx-> pid)
+    }.toMap
+
+
+
+    val features = watchxDay.map { e =>
+
+      Vectors.dense(e._2.map(_._2.asInstanceOf[Double]).toArray)
+    }
+
+      val featureRDD = sc.parallelize(features,100).cache
+
+
+    // Cluster the data into two classes using KMeans
+    import collection.mutable.ArrayBuffer
+    var rt = ArrayBuffer[(Int,Int,Double)]()
+
+    for (iter <- Array(20, 50, 100);
+      cluster <- Array(10, 20, 50 )) {
+
+      val clusters = KMeans.train(featureRDD, cluster, iter)
+
+      // Evaluate clustering by computing Within Set Sum of Squared Errors
+      val WSSSE = clusters.computeCost(featureRDD)
+
+      rt +=  Tuple3(iter, cluster, WSSSE)
+      println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + WSSSE)
+    }
+
+
   }
 
 
 
+  }
 
 
 }

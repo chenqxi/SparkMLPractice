@@ -2,6 +2,9 @@
  * Created by cloudera on 6/26/15.
  */
 
+import org.apache.spark.mllib.clustering.{KMeans, KMeansModel}
+import org.apache.spark.mllib.linalg
+import org.apache.spark.mllib.linalg.distributed.RowMatrix
 import org.joda.time.DateTime
 
 import scala.collection.mutable
@@ -193,6 +196,30 @@ object WatchLogParse{
 
     }
 
+    case class WatchNum(pname:String, pid:String, day:Int, watchNum:Int)
+
+    val watchNums = mutable.ArrayBuffer[WatchNum]()
+
+    for (p <- watchxDay ) {
+
+      val pid:String = p._1.asInstanceOf[String]
+      val name:String = pid2pname.getOrElse(pid, pid).asInstanceOf[String]
+
+      println(s"program=$name pid=${pid}")
+
+      for (w <- p._2.zipWithIndex){
+
+        println(s"date: ${w._1._1} times=${w._1._2}")
+
+        val log = WatchNum(name, pid, w._2, w._1._2)
+
+        watchNums += log
+      }
+
+    }
+
+    val watchNumsDF = watchNums.toDF
+
 
     //OK data set is ready, the item look like (program, day off since first day) watch times
     // we can use k-means algorithm to cluster the category of programs
@@ -218,42 +245,11 @@ object WatchLogParse{
 
 
     // Cluster the data into two classes using KMeans
-    import collection.mutable.ArrayBuffer
-    var rt = ArrayBuffer[(KMeansModel, Int,Int,Double)]()
-
-    for (iter <- Array(20, 50, 100);
-      cluster <- Array(10, 20, 50 )) {
-
-      val model = KMeans.train(featureRDD, cluster, iter)
-
-
-      // Evaluate clustering by computing Within Set Sum of Squared Errors
-      val WSSSE = model.computeCost(featureRDD)
-
-      rt +=  Tuple4(model, iter, cluster, WSSSE)
-      println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + WSSSE)
-    }
-
-    rt.foreach{
-
-      case (model, iter, cluster, wssse) => println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + wssse)
-    }
-
-
-    val models = rt.map { e => val model = e._1
-      //display the model in detail
-      model.clusterCenters.foreach { c =>
-
-        println(s"Cluster center $c")
-
-      }
-
-      model
-    }
+    val rtWithoutNormalize: ArrayBuffer[(KMeansModel, Int, Int, Double)] = createModels(featureRDD)
 
 
     //it seems iter=20 cluster=50 is best model, let's choose it as candidate
-    val goodModel = rt.reduceLeft{ (l, r ) =>
+    val goodModel = rtWithoutNormalize.reduceLeft{ (l, r ) =>
 
       if (r._2==20 && r._3==50)  r else l
 
@@ -272,11 +268,80 @@ object WatchLogParse{
     }
 
 
+    //evaluate dataset after normalized it
+    val watchMatrix = new RowMatrix(featureRDD)
+    val watchSummary = watchMatrix.computeColumnSummaryStatistics()
+
+    println(s"Summary mean=${watchSummary.mean} varianc=${watchSummary.variance}")
+
+    import org.apache.spark.mllib.feature.Normalizer
+
+    //Use L2 normalizer
+    val normalizer = new Normalizer(2)
+    val normFeatures = normalizer.transform(featureRDD)
+
+    val rtWithNormalize = createModels(normFeatures)
+
+    val goodModelNorm = rtWithNormalize.reduceLeft{ (l, r ) =>
+
+      if (r._2==20 && r._3==50)  r else l
+
+    }._1
+
+    val grpCategoryNorm = features.zipWithIndex.map{
+
+      case (v, idx ) => val category = goodModelNorm.predict(v)
+        (category,programIdMap(idx), pid2pname(programIdMap(idx)))
+
+    }.groupBy(_._1)
+
+    grpCategoryNorm.toList.sortBy(_._1).foreach{  e => println(e._2.map(_._3).mkString(":") + "\n") }
+
+    grpCategoryNorm.toList.sortBy(_._1).foreach{ e =>
+
+      e._2.foreach{ case (category, pid,progs) => println(s"idx=$category pname=$progs pid=$pid ") }
+    }
+
+
 
   }
 
+  //Generate model from VectorRDD
+  def createModels(featureRDD: RDD[linalg.Vector]): ArrayBuffer[(KMeansModel, Int, Int, Double)] = {
+    
+    import collection.mutable.ArrayBuffer
+    var rt = ArrayBuffer[(KMeansModel, Int, Int, Double)]()
+    val run = 5
+
+    for (iter <- Array(20, 50, 100);
+         cluster <- Array(10, 20, 30, 50)) {
+
+      val model = KMeans.train(featureRDD, cluster, iter, run)
 
 
+      // Evaluate clustering by computing Within Set Sum of Squared Errors
+      val WSSSE = model.computeCost(featureRDD)
+
+      rt += Tuple4(model, iter, cluster, WSSSE)
+      println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + WSSSE)
+    }
+
+    rt.foreach {
+
+      case (model, iter, cluster, wssse) => println(s"iter=$iter cluster=$cluster Within Set Sum of Squared Errors = " + wssse)
+    }
 
 
+    val models = rt.map { e => val model = e._1
+      //display the model in detail
+      model.clusterCenters.foreach { c =>
+
+        println(s"Cluster center $c")
+
+      }
+
+      model
+    }
+    rt
+  }
 }
